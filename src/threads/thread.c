@@ -1,4 +1,4 @@
-#include "threads/thread.h"
+mu#include "threads/thread.h"
 #include <debug.h>
 #include <stddef.h>
 #include <random.h>
@@ -19,6 +19,14 @@
    Used to detect stack overflow.  See the big comment at the top
    of thread.h for details. */
 #define THREAD_MAGIC 0xcd6abf4b
+
+/* 스레드 a와 b의 우선순위를 비교합니다.
+   a의 우선순위가 b보다 높으면 true를 반환합니다. */
+static bool
+priority_less_func (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
+{
+  return list_entry (a, struct thread, elem)->priority > list_entry (b, struct thread, elem)->priority;
+}
 
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
