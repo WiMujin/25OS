@@ -1,4 +1,4 @@
-mu#include "threads/thread.h"
+#include "threads/thread.h"
 #include <debug.h>
 #include <stddef.h>
 #include <random.h>
@@ -78,6 +78,7 @@ static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
+static void check_preemption (void);
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -245,9 +246,11 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  list_insert_ordered (&ready_list, &t->elem, priority_less_func, NULL); //우선순위 순으로 정렬하여 삽입
   t->status = THREAD_READY;
   intr_set_level (old_level);
+
+  check_preemption (); // 새로 깨어난 스레드의 우선순위가 현재 실행 중인 스레드보다 높을 경우 CPU양보
 }
 
 /* Returns the name of the running thread. */
@@ -339,11 +342,29 @@ thread_foreach (thread_action_func *func, void *aux)
     }
 }
 
+/* 현재 실행 중인 스레드와 ready_list의 가장 높은 우선순위 스레드를 비교하여
+   필요하면 CPU를 양보(yield)합니다. */
+void
+check_preemption (void)
+{
+  if (!list_empty (&ready_list))
+  {
+    struct thread *current = thread_current ();
+    struct thread *front = list_entry (list_front (&ready_list), struct thread, elem);
+
+    if (current->priority < front->priority)
+    {
+      thread_yield ();
+    }
+  }
+}
+
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) 
 {
   thread_current ()->priority = new_priority;
+  check_preemption (); //스레드가 자신의 우선순위를 바꿀 때 마다 자기보다 급한 스레드가 있는지 확인
 }
 
 /* Returns the current thread's priority. */
