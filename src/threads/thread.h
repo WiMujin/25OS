@@ -1,6 +1,5 @@
 #ifndef THREADS_THREAD_H
 #define THREADS_THREAD_H
-
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
@@ -87,7 +86,15 @@ struct thread
     enum thread_status status;          /* Thread state. */
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
-    int priority;
+
+    int priority;                       /* 현재 우선순위 (기부받았을 수 있음) */
+
+    /* Priority Donation을 위해 하단 부분 추가 */
+    int original_priority; /* 기부 받기 전 원래 순위*/
+    struct list donations;  /* 나에게 우선순위를 기부한 스레드들의 목록*/
+    struct lock *waiting_on_lock; /* 내가 현재 대기중인 락*/
+    /* 상단 부분 추가했음 */
+
     int64_t wakeup_tick;                   /* Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
 

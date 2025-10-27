@@ -319,7 +319,7 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+    list_insert_ordered (&ready_list, &cur->elem, priority_less_func, NULL);
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -491,6 +491,13 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+
+  /* Priority Donation을 위해 아래 부분 추가*/
+  t-> original_priority = priority;
+  list_init (&t->donations);
+  t->wating_on_lock = NULL;
+  /* 윗 부분 추가했음*/
+
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
