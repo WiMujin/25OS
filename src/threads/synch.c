@@ -189,6 +189,7 @@ lock_init (struct lock *lock)
    interrupt handler.  This function may be called with
    interrupts disabled, but interrupts will be turned back on if
    we need to sleep. */
+
 void
 lock_acquire (struct lock *lock)
 {
@@ -196,13 +197,31 @@ lock_acquire (struct lock *lock)
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
 
-  sema_down (&lock->semaphore);
-  lock->holder = thread_current ();
+  struct thread *current = thread_current ();
+
+  // (선택적) 락 소유자가 이미 있다면
+  if (lock->holder != NULL) 
+    {
+      // 1. 내가 어떤 락을 기다리는지 기록
+      current->waiting_on_lock = lock;
+      
+      // 2. 락 소유자의 'donations' 리스트에 나를 추가
+      list_push_back (&lock->holder->donations, &current->elem_for_donation);
+      
+      // 3. 락 소유자부터 연쇄적으로 우선순위 재계산 (헬퍼 함수 호출)
+      thread_recalculate_priority (lock->holder);
+    }
+
+  sema_down (&lock->semaphore); // 락을 얻을 때까지 잠들기
+
+  // 4. 락 획득 후
+  lock->holder = current;
+  current->waiting_on_lock = NULL;
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
    on failure.  The lock must not already be held by the current
-   thread.
+   thre
 
    This function will not sleep, so it may be called within an
    interrupt handler. */
@@ -231,7 +250,16 @@ lock_release (struct lock *lock)
   ASSERT (lock != NULL);
   ASSERT (lock_held_by_current_thread (lock));
 
+  struct thread *current = thread_current ();
   lock->holder = NULL;
+
+  // 1. 현재 스레드(락을 방금 놓은)의 'donations' 리스트에서
+  //    이 'lock'을 기다리던 스레드들을 제거 (헬퍼 함수 호출)
+  thread_remove_donors_for_lock (lock);
+
+  // 2. 현재 스레드의 우선순위를 재계산 (헬퍼 함수 호출)
+  thread_recalculate_priority (current);
+
   sema_up (&lock->semaphore);
 }
 
