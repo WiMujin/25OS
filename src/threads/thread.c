@@ -495,8 +495,9 @@ init_thread (struct thread *t, const char *name, int priority)
   /* Priority Donation을 위해 아래 부분 추가*/
   t-> original_priority = priority;
   list_init (&t->donations);
-  t->wating_on_lock = NULL;
-  /* 윗 부분 추가했음*/
+  t->waiting_on_lock = NULL;
+  /* 윗 부분 추가했음
+  오타 수정함*/
 
   t->magic = THREAD_MAGIC;
 
@@ -613,6 +614,69 @@ allocate_tid (void)
   lock_release (&tid_lock);
 
   return tid;
+}
+/* Priority Donation 헬퍼 함수 구현 */
+
+/* 스레드 t의 유효 우선순위(effective priority)를 재계산합니다.
+ * 이는 t의 원래 우선순위(original_priority)와 t에게 락을 기다리며 우선순위를 기부한
+ * 스레드들 중 가장 높은 우선순위를 비교하여 갱신합니다. */
+void
+thread_recalculate_priority (struct thread *t) {
+    // 1. 우선순위를 원래 우선순위로 초기화합니다.
+    t->priority = t->original_priority;
+   
+    // 2. donations 리스트가 비어있지 않은 경우, 기부자들의 우선순위를 확인합니다.
+    if (!list_empty(&t->donations)) {
+        struct list_elem *e;
+        int max_donated_priority = PRI_MIN; // PRI_MIN은 가장 낮은 우선순위(0)입니다.
+       
+        // donations 리스트를 순회하며 가장 높은 기부자 우선순위를 찾습니다.
+        // (lock_acquire에서 list_push_back을 사용했으므로 전체 순회가 필요합니다)
+        for (e = list_begin(&t->donations); e != list_end(&t->donations); e = list_next(e)) {
+            struct thread *donor = list_entry(e, struct thread, elem_for_donation);
+           
+            if (donor->priority > max_donated_priority) {
+                max_donated_priority = donor->priority;
+            }
+        }
+       
+        // 3. 원래 우선순위와 가장 높은 기부 우선순위 중 더 높은 값으로 갱신합니다.
+        if (max_donated_priority > t->priority) {
+            t->priority = max_donated_priority;
+        }
+    }
+   
+    // 4. 우선순위가 변경되었고 현재 스레드라면 선점 검사를 수행합니다.
+    // (lock_release -> remove_donors -> recalculate(current) 경로에서
+    // 우선순위가 낮아졌을 때를 대비해 check_preemption()을 호출합니다.)
+    if (t == thread_current()) {
+        check_preemption();
+    }
+}
+
+
+/* 현재 스레드(락 소유자)의 donations 리스트에서 주어진 lock을 기다리던 기부자들을 제거합니다.
+ * 이는 lock_release()에서 호출됩니다. */
+void
+thread_remove_donors_for_lock (struct lock *lock) {
+    struct thread *curr = thread_current();
+    struct list_elem *e = list_begin(&curr->donations);
+   
+    // 리스트를 순회하며 제거해야 하므로, 반복문 내에서 e = list_remove(e)를 사용합니다.
+    while (e != list_end(&curr->donations)) {
+        struct thread *donor = list_entry(e, struct thread, elem_for_donation);
+       
+        // 기부자(donor)가 현재 풀려는 락(lock)을 기다리고 있는지 확인합니다.
+        if (donor->waiting_on_lock == lock) {
+            e = list_remove(e); // 리스트에서 제거하고 다음 요소로 포인터를 이동시킵니다.
+        } else {
+            e = list_next(e); // 다음 요소로 이동합니다.
+        }
+    }
+   
+    // 기부(donation)를 회수했으므로 현재 스레드의 우선순위를 재계산합니다.
+    // (이 함수 내부에서 check_preemption()이 호출됩니다)
+    thread_recalculate_priority(curr);
 }
 
 /* Offset of `stack' member within `struct thread'.

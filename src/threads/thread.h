@@ -89,10 +89,15 @@ struct thread
 
     int priority;                       /* 현재 우선순위 (기부받았을 수 있음) */
 
+    /* Project 1-1: Alarm Clock */
+    struct list_elem timer_elem;       /* sleep_list에 사용될 elem*/
+
     /* Priority Donation을 위해 하단 부분 추가 */
     int original_priority; /* 기부 받기 전 원래 순위*/
     struct list donations;  /* 나에게 우선순위를 기부한 스레드들의 목록*/
     struct lock *waiting_on_lock; /* 내가 현재 대기중인 락*/
+    struct list_elem elem_for_donation; /* 'donations' 리스트에서 사용할 요소 */
+    
     /* 상단 부분 추가했음 */
 
     int64_t wakeup_tick;                   /* Priority. */
@@ -140,6 +145,13 @@ void thread_foreach (thread_action_func *, void *);
 
 int thread_get_priority (void);
 void thread_set_priority (int);
+
+/* Priority Scheduling/Donation을 위해 추가*/
+bool compare_thread_priority (const struct list_elem *a,
+                              const struct list_elem *b,
+                              void *aux UNUSED);
+void thread_recalculate_priority (struct thread *t);
+void thread_remove_donors_for_lock (struct lock *lock);
 
 int thread_get_nice (void);
 void thread_set_nice (int);
