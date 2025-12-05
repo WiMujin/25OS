@@ -80,9 +80,9 @@ typedef int tid_t;
    only because they are mutually exclusive: only a thread in the
    ready state is on the run queue, whereas only a thread in the
    blocked state is on a semaphore wait list. */
+
 struct thread
   {
-   int64_t wakeup;
     /* Owned by thread.c. */
     tid_t tid;                          /* Thread identifier. */
     enum thread_status status;          /* Thread state. */
@@ -94,12 +94,14 @@ struct thread
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
-    //Donation 구현을 위한 구조체
-    int init_priority;
-    
-    struct lock *wait_on_lock;
-    struct list donations;
-    struct list_elem donation_elem;
+    /* [Project 1-1] Alarm Clock */
+    int64_t wakeup;
+
+    /* [Project 1-2] Priority Donation 필수 변수들 */
+    int original_priority;              /* 기부 받기 전 원래 우선순위 */
+    struct list donations;              /* 나에게 기부한 스레드 리스트 */
+    struct lock *waiting_on_lock;       /* 내가 기다리는 락 */
+    struct list_elem elem_for_donation; /* donation 리스트용 elem */
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
@@ -146,16 +148,15 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
-void thread_sleep(int64_t ticks);
-void thread_awake(int64_t ticks);
+/* [Project 1-1] Alarm Clock Functions */
+void thread_sleep (int64_t ticks);
+void thread_awake (int64_t ticks);
 
-void thread_test_preemption (void);
-bool thread_compare_priority (struct list_elem *l, struct list_elem *s, void *aux);
-
-bool thread_compare_donate_priority (const struct list_elem *l, 
-				const struct list_elem *s, void *aux UNUSED);
-void donate_priority (void);
-void remove_with_lock (struct lock *lock);
-void refresh_priority (void);
+/* [Project 1-2] Priority Scheduling Helper Functions */
+void check_preemption (void);
+bool priority_less_func (const struct list_elem *a, const struct list_elem *b, void *aux);
+bool donation_less_func (const struct list_elem *a, const struct list_elem *b, void *aux);
+void thread_recalculate_priority (struct thread *t);
+void thread_remove_donors_for_lock (struct lock *lock);
 
 #endif /* threads/thread.h */
