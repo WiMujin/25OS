@@ -28,52 +28,219 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
 tid_t
 process_execute (const char *file_name) 
 {
-  char *fn_copy;
-  tid_t tid;
+    char *command_line;
+    char *name;
+    char *remain;
+    tid_t tid;
 
-  /* Make a copy of FILE_NAME.
-     Otherwise there's a race between the caller and load(). */
-  fn_copy = palloc_get_page (0);
-  if (fn_copy == NULL)
-    return TID_ERROR;
-  strlcpy (fn_copy, file_name, PGSIZE);
+    /* 1. command_line 메모리 할당 및 복사 */
+    // start_process에 넘겨줄 전체 명령행 문자열 저장
+    command_line = palloc_get_page (0);
+    if (command_line == NULL)
+        return TID_ERROR;
+    strlcpy (command_line, file_name, PGSIZE);
 
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
-  if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
-  return tid;
+    /* 2. name 메모리 할당 및 복사 */
+    // 스레드의 이름(프로그램명)을 파싱하기 위한 임시 공간
+    name = palloc_get_page(0);
+    if (name == NULL) {
+        palloc_free_page(command_line); // name 할당 실패 시 command_line도 해제 필요
+        return TID_ERROR;
+    }
+    strlcpy (name, file_name, PGSIZE);
+
+    /* 3. Name Parsing (핵심 변경 사항) */
+    // 공백을 기준으로 첫 번째 토큰(프로그램 이름)만 추출하여 name에 저장 
+    // strtok_r은 원본 문자열을 수정하므로 복사본(name)을 사용합니다.
+    char *program_name = strtok_r(name, " ", &remain);
+
+    /* 4. Thread 생성 */
+    // 스레드 이름: 파싱된 프로그램 이름 (program_name)
+    // start_process 인자: 전체 명령행 문자열 (command_line)
+    tid = thread_create (program_name, PRI_DEFAULT, start_process, command_line);
+
+    /* 5. 메모리 해제 */
+    // 파싱을 위해 사용했던 임시 공간 name은 스레드 생성 후 필요 없으므로 해제 [cite: 103]
+    // 주의: palloc으로 할당한 페이지의 시작 주소를 해제해야 합니다. 
+    // (위에서 name 변수를 strtok_r 리턴값으로 덮어쓰지 않도록 주의하거나, 원본 포인터를 해제해야 함)
+    palloc_free_page(name); 
+
+    if (tid == TID_ERROR)
+        palloc_free_page (command_line);
+
+    return tid;
 }
 
+/* 인자들을 스택에 저장하는 헬퍼 함수 */
+void
+save_to_stack (void **esp, int length, char *text, int num, int method)
+{
+  *esp -= length;  // 스택 공간 확보 (아래로 성장)
+  
+  if (method) // 문자열 저장 모드
+    {
+      strlcpy (*esp, text, length); 
+    }
+  else
+    {
+      **(uint32_t **)esp = num; // 해당 위치에 값 저장
+    }
+}
 /* A thread function that loads a user process and starts it
    running. */
+/* userprog/process.c */
+
 static void
 start_process (void *file_name_)
 {
-  char *file_name = file_name_;
-  struct intr_frame if_;
-  bool success;
+    char *command_line = file_name_;
+    struct intr_frame if_;
+    bool success;
+    
+    /* 보고서 Page 6 [cite: 145-148] */
+    char *remain;
+    char **argv;
+    int argc = 0;
+    
+    argv = palloc_get_page(0); // [cite: 148]
+    if (argv == NULL) // 예외 처리 추가
+    {
+        palloc_free_page(command_line);
+        exit(-1);
+    }
 
-  /* Initialize interrupt frame and load executable. */
-  memset (&if_, 0, sizeof if_);
-  if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
-  if_.cs = SEL_UCSEG;
-  if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+    /* 1. Argument Parsing (argc 계산) */
+    /* 보고서 Page 6 [cite: 150-155] */
+    // 보고서에는 따옴표 오타가 있어 " " (공백)으로 수정함
+    for (argv[argc] = strtok_r (command_line, " ", &remain);
+         argv[argc] != NULL;
+         argv[argc] = strtok_r (NULL, " ", &remain))
+    {
+        argc++;
+    }
 
-  /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
-    thread_exit ();
+    /* 2. Interrupt Frame 초기화 */
+    /* 보고서 Page 7 [cite: 158-161] */
+    memset (&if_, 0, sizeof if_);
+    if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
+    if_.cs = SEL_UCSEG;
+    if_.eflags = FLAG_IF | FLAG_MBS;
 
-  /* Start the user process by simulating a return from an
-     interrupt, implemented by intr_exit (in
-     threads/intr-stubs.S).  Because intr_exit takes all of its
-     arguments on the stack in the form of a `struct intr_frame',
-     we just point the stack pointer (%esp) to our stack frame
-     and jump to it. */
-  asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
-  NOT_REACHED ();
+    /* 3. Load 실행 */
+    /* 보고서 Page 7 [cite: 163] */
+    success = load (argv[0], &if_.eip, &if_.esp);
+    
+    /* 4. 부모 프로세스 동기화 */
+    /* 보고서 Page 7 [cite: 164-165] */
+    thread_current()->is_load = success;
+    sema_up(&thread_current()->sema_load);
+
+    /* 5. Load 성공 시 Stack 구성 */
+    /* 보고서 Page 7 [cite: 168] ~ Page 43 [cite: 1173] */
+    if (success)
+    {
+        int arg_len = 0;
+        int total_len = 0;
+        int start = argc - 1;
+
+        /* [A] 문자열을 스택에 저장 (역순) [cite: 172-177] */
+        for(int i = start; i >= 0; i--)
+        {
+            arg_len = strlen(argv[i]) + 1;
+            total_len += arg_len;
+            save_to_stack(&if_.esp, arg_len, argv[i], 0, 1);
+            argv[i] = if_.esp; // 스택 주소로 업데이트 [cite: 177]
+        }
+
+        /* [B] Word Align (4바이트 정렬) [cite: 180-183] */
+        if (total_len % 4)
+        {
+            // 보고서의 의도대로 패딩 계산 로직 적용
+            save_to_stack(&if_.esp, 4 - (total_len % 4), NULL, 0, 0); 
+        }
+
+        /* [C] NULL Pointer Sentinel (argv[argc]) [cite: 183] */
+        save_to_stack(&if_.esp, 4, NULL, 0, 0);
+
+        /* [D] argv 포인터들의 주소 저장 [cite: 184-185] */
+        for(int i = start; i >= 0; i--)
+        {
+            save_to_stack(&if_.esp, 4, NULL, (uint32_t)argv[i], 0);
+        }
+
+        /* [E] argv 배열의 시작 주소 (char **) [cite: 186-187] */
+        // 보고서: if_.esp -= 4; *(uint32_t **)if_.esp = if_.esp+4;
+        // 위 로직과 동일하게 save_to_stack 활용
+        save_to_stack(&if_.esp, 4, NULL, (uint32_t)(if_.esp + 4), 0);
+
+        /* [F] argc 저장 [cite: 188-190] */
+        save_to_stack(&if_.esp, 4, NULL, argc, 0);
+
+        /* [G] Fake Return Address [cite: 191-193] */
+        save_to_stack(&if_.esp, 4, NULL, 0, 0);
+
+        /* 6. 메모리 해제 (성공 시) [cite: 1176-1177] */
+        // Multi-oom 해결을 위한 위치
+        palloc_free_page(argv);
+        palloc_free_page(command_line);
+
+        //hex_dump(if_.esp, if_.esp, PHYS_BASE - if_.esp, true); // 디버깅용 [cite: 1159]
+
+        /* Context Switch */
+        asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
+        NOT_REACHED ();
+    }
+    
+    /* 7. Load 실패 시 [cite: 1178-1183] */
+    else
+    {
+        // Multi-oom 해결을 위해 실패 시에도 반드시 free
+        palloc_free_page(argv);
+        palloc_free_page(command_line);
+        exit(-1);
+    }
+}
+
+struct thread *get_child_process(int pid)
+{
+ struct list_elem *e;
+ struct thread *cur = thread_current();
+ struct thread *child;
+
+ // child list를 돌며 요청한 pid를 가진 chiild가 있는지 탐색
+ for (e = list_begin(&cur->child_list);
+ e != list_end(&cur->child_list);
+ e = list_next(e))
+ {
+ child = list_entry(e, struct thread, child_elem);
+
+ if (child->tid == pid)
+ return child;
+ }
+
+ return NULL;
+}
+
+
+
+void remove_child_process (struct thread *child)
+{
+ if (child != NULL)
+ {
+ list_remove(&child->child_elem);
+ palloc_free_page(child);
+ }
+}
+
+struct file *process_get_file (int fd)
+{
+ struct thread *cur = thread_current();
+ if ((2 <= fd) && (fd < cur->fd_max))
+ {
+ return cur->fd_table[fd];
+ }
+ else
+ exit(-1);
 }
 
 /* Waits for thread TID to die and returns its exit status.  If
@@ -91,7 +258,32 @@ process_wait (tid_t child_tid UNUSED)
   return -1;
 }
 
-/* Free the current process's resources. */
+int process_add_file (struct file *f)
+{
+ struct thread *cur = thread_current();
+ int fd = cur->fd_max;
+ cur->fd_table[fd] = f;
+ cur->fd_max++;
+ return fd;
+}
+
+void process_close_file (int fd)
+{
+ struct thread* cur = thread_current();
+ struct file *file = process_get_file(fd);
+
+ if (file == NULL)
+ return;
+ if ((2 <= fd) && (fd < cur->fd_max))
+ {
+ file_close(file);
+ cur->fd_table[fd] = NULL;
+ for (int i = fd; i < cur->fd_max-1; i++)
+ cur->fd_table[i] = cur->fd_table[i+1];
+ cur->fd_max--;
+ }
+}
+
 void
 process_exit (void)
 {

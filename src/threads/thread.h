@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -18,6 +19,9 @@ enum thread_status
    You can redefine this to whatever type you like. */
 typedef int tid_t;
 #define TID_ERROR ((tid_t) -1)          /* Error value for tid_t. */
+
+/* Process identifier type (Project 2 addition). */
+typedef tid_t pid_t; // <-- 이 줄을 추가합니다.
 
 /* Thread priorities. */
 #define PRI_MIN 0                       /* Lowest priority. */
@@ -103,10 +107,23 @@ struct thread
     struct lock *waiting_on_lock;       /* 내가 기다리는 락 */
     struct list_elem elem_for_donation; /* donation 리스트용 elem */
 
-#ifdef USERPROG
+   #ifdef USERPROG
     /* Owned by userprog/process.c. */
-    uint32_t *pagedir;                  /* Page directory. */
-#endif
+    uint32_t *pagedir;          /* Page directory. */
+    struct list_elem child_elem; /* List element for child_list */
+    struct list child_list;      /* List of children */ 
+    
+    bool is_load;               /* thread의 program load 성공 여부 */ 
+    bool is_exit;               /* thread의 종료 여부 */ 
+    int exit_status;            /* thread의 exit status 저장 (여기가 원인입니다) */ 
+
+    struct semaphore sema_load; /* load를 위한 sema */
+    struct semaphore sema_exit; /* exit을 위한 sema */ 
+    
+    int fd_max;                 /* file descriptor table에 존재하는 fd값의 최대 */
+    struct file *current_file;  /* 현재 실행중인 file */ 
+    struct file **fd_table;     /* file descriptor table */ 
+   #endif
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */

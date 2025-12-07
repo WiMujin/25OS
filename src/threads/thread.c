@@ -179,6 +179,7 @@ thread_print_stats (void)
    The code provided sets the new thread's `priority' member to
    PRIORITY, but no actual priority scheduling is implemented.
    Priority scheduling is the goal of Problem 1-3. */
+/* threads/thread.c */
 tid_t
 thread_create (const char *name, int priority,
                thread_func *function, void *aux)
@@ -199,6 +200,30 @@ thread_create (const char *name, int priority,
   /* Initialize thread. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
+
+#ifdef USERPROG
+  /* Project 2: User Program Initialization */
+  t->is_load = false; // program이 load되지 않음 [cite: 406]
+  t->is_exit = false; // process가 종료되지 않음 [cite: 407]
+
+  // 세마포어 초기화 (부모-자식 동기화를 위해 0으로 초기화)
+  sema_init(&t->sema_load, 0); 
+  sema_init(&t->sema_exit, 0); 
+
+  // 현재 실행 중인 스레드(부모)의 자식 목록에 새로 생성된 스레드(자식)를 추가
+  list_push_back(&(running_thread()->child_list), &t->child_elem);
+
+  // File Descriptor Table 초기화
+  t->fd_max = 2; // fd 0(stdin), 1(stdout) 다음인 2부터 시작 [cite: 413]
+  t->fd_table = palloc_get_page(PAL_ZERO); // [cite: 414]
+
+  if (t->fd_table == NULL)
+  {
+    // fd_table 할당 실패 시, 이미 할당된 스레드 구조체 't'도 해제해야 메모리 누수를 막을 수 있습니다.
+    palloc_free_page(t); 
+    return TID_ERROR;
+  }
+#endif
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
@@ -518,6 +543,8 @@ init_thread (struct thread *t, const char *name, int priority)
   list_init (&t->donations);
   t->waiting_on_lock = NULL;
 
+  list_init(&(t->child_list));
+
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
@@ -643,13 +670,19 @@ uint32_t thread_stack_ofs = offsetof (struct thread, stack);
 void
 check_preemption (void)
 {
-  if (!list_empty (&ready_list))
-  {
-    struct thread *cur = thread_current ();
-    struct thread *front = list_entry (list_begin (&ready_list), struct thread, elem);
-    if (front->priority > cur->priority)
-      thread_yield ();
-  }
+
+    if (!list_empty (&ready_list) && 
+
+        thread_current ()->priority < list_entry (list_front (&ready_list), struct thread, elem)->priority &&
+
+        !intr_context ()) 
+
+    {
+
+        thread_yield ();
+
+    }
+
 }
 
 void
