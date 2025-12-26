@@ -5,220 +5,219 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "filesys/filesys.h"
-#include "threads/synch.h"
-#include "process.h"
 #include "filesys/file.h"
+#include "threads/synch.h"
+#include "userprog/process.h" 
+#include <string.h> 
+#include "devices/shutdown.h" // [추가] halt()를 위해 필요
+#include "devices/input.h"    // [추가] input_getc()를 위해 필요
 
-#define STACK_END 0x8048000  // 스택의 가장 아래 유효 주소 (예시)
-#define STACK_BASE 0xc0000000 // 커널 영역 시작 지점 (PHYS_BASE 근처)
+#define STACK_END 0x8048000  
 
 static void syscall_handler (struct intr_frame *);
+void get_argument(void *esp, int *argv, int count);
 struct lock lock_file;
 
 void
 syscall_init (void) 
 {
     intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
-    lock_init(&lock_file); // <-- 이 줄을 추가하여 락을 '초기화'합니다. 
+    lock_init(&lock_file); 
 }
 
-// check_address 함수의 정의 (프로토타입이 없을 경우)
+/* 주소 유효성 검사 */
 void check_address (void *addr)
 {
-    // 1. NULL 포인터 검사 [cite: 478, 479]
-    // 2. 스택의 유효 범위 검사 (유저 스택 영역인지) [cite: 480, 483, 484]
-    // 3. 사용자 영역 주소인지 검사 [cite: 488, 491]
-    // 4. 해당 주소에 페이지가 할당되어 매핑되어 있는지 검사 [cite: 493, 494]
-    
-    if (addr == NULL || 
-        addr < (void *)STACK_END || 
-        addr >= (void *)STACK_BASE ||
-        !is_user_vaddr(addr) ||
-        pagedir_get_page(thread_current()->pagedir, addr) == NULL)
+    /* 주소값이 유저 영역인지, NULL이 아닌지 확인 */
+    if (addr == NULL || !is_user_vaddr(addr) || addr < (void *)0x08048000)
     {
-        // 유효하지 않은 주소일 경우 즉시 프로세스 종료 [cite: 476]
         exit(-1);
+    }
+    
+    /* 실제 매핑된 페이지인지 확인 (pagedir_get_page가 NULL이면 매핑 안됨) */
+    if (pagedir_get_page(thread_current()->pagedir, addr) == NULL)
+    {
+        exit(-1);
+    }
+}
+
+/* 인자 가져오기 헬퍼 함수 */
+void
+get_argument(void *esp, int *argv, int count)
+{
+    int *ptr = (int *)esp;
+    for(int i = 0; i < count; i++)
+    {
+        ptr++; // 다음 인자 위치로 이동
+        check_address((void *)ptr); // 포인터가 가리키는 스택 주소가 유효한지
+        argv[i] = *ptr; // 값 읽어오기
     }
 }
 
 bool create(const char *file, unsigned initial_size)
 {
- check_address(file);
- return filesys_create(file, initial_size);
+    check_address((void *)file);
+    return filesys_create(file, initial_size);
 }
 
 bool remove (const char *file)
 {
- check_address(file);
- return filesys_remove(file);
-}
-
-int filesize (int fd)
-{
- struct file *f = process_get_file(fd);
- if (f == NULL)
- return -1;
- return
- file_length(f);
+    check_address((void *)file);
+    return filesys_remove(file);
 }
 
 int open (const char *file)
 {
- check_address(file);
- if (file == NULL)
- exit(-1);
+    check_address((void *)file);
+    
+    if (file == NULL) return -1; // 방어 코드
 
- lock_acquire(&lock_file);
- struct file *f = filesys_open(file);
+    lock_acquire(&lock_file);
+    struct file *f = filesys_open(file);
+    
+    /* 실행 중인 파일은 쓰기 금지 */
+    if (f != NULL && strcmp(thread_current()->name, file) == 0) {
+        file_deny_write(f);
+    }
 
- if (strcmp (thread_current()->name, file) == 0)
- file_deny_write(f);
- int fd;
- if (f != NULL)
- fd = process_add_file(f);
- else
- fd = -1;
- lock_release(&lock_file);
+    int fd = -1;
+    if (f != NULL) {
+        fd = process_add_file(f);
+    }
+    lock_release(&lock_file);
 
- return fd;
+    return fd;
+}
+
+int filesize (int fd)
+{
+    struct file *f = process_get_file(fd);
+    if (f == NULL) return -1;
+    return file_length(f);
 }
 
 int read (int fd, void *buffer, unsigned size)
 {
- check_address(buffer);
- lock_acquire(&lock_file);
- if (fd == 0)
- {
- char key;
- unsigned i;
- unsigned char *cast_buffer = buffer;
- for (i = 0; i < size; i++)
- {
- key = input_getc();
- *cast_buffer++ = key;
- if (key == '\0')
- break;
- }
- lock_release(&lock_file);
- return i;
- }
- else
- {
- struct file *f = process_get_file(fd);
- if (f == NULL)
- {
- lock_release(&lock_file);
- return -1;
- }
- int read_byte = file_read(f, buffer, size);
- lock_release(&lock_file);
- return read_byte;
- }
+    check_address(buffer);
+    
+    /* 버퍼의 끝 주소도 검사 (페이지 경계 넘침 방지) */
+    void *end_buffer = (char *)buffer + size - 1;
+    check_address(end_buffer);
+
+    lock_acquire(&lock_file);
+    int read_byte = -1;
+
+    if (fd == 0) // STDIN
+    {
+        unsigned i;
+        char *buf = buffer;
+        for (i = 0; i < size; i++)
+        {
+            char key = input_getc(); // devices/input.h 필요
+            *buf++ = key;
+            if (key == '\0') break;
+        }
+        read_byte = i;
+    }
+    else if (fd > 1) // 파일 읽기
+    {
+        struct file *f = process_get_file(fd);
+        if (f != NULL) {
+            read_byte = file_read(f, buffer, size);
+        }
+    }
+    lock_release(&lock_file);
+    return read_byte;
 }
 
 int write (int fd, const void *buffer, unsigned size)
 {
- check_address(buffer);
- int write_byte = 0;
- lock_acquire(&lock_file);
- if (fd == 1)
- {
- putbuf(buffer, size);
- write_byte = size;
- }
- else
- {
- struct file *file = process_get_file(fd);
- if (file == NULL)
- write_byte = -1;
- else
- write_byte = file_write(file, buffer, size);
- }
- lock_release(&lock_file);
- return write_byte;
+    check_address((void *)buffer);
+    
+    lock_acquire(&lock_file);
+    int write_byte = -1;
+
+    if (fd == 1) // STDOUT
+    {
+        putbuf(buffer, size);
+        write_byte = size;
+    }
+    else if (fd > 1) // 파일 쓰기
+    {
+        struct file *file = process_get_file(fd);
+        if (file != NULL) {
+            write_byte = file_write(file, buffer, size);
+        }
+    }
+    lock_release(&lock_file);
+    return write_byte;
 }
 
 void seek (int fd, unsigned position)
 {
- struct file *file = process_get_file(fd);
- if (file != NULL)
- file_seek(file, position);
+    struct file *file = process_get_file(fd);
+    if (file != NULL)
+        file_seek(file, position);
 }
 
 unsigned tell (int fd)
 {
- struct file *file = process_get_file(fd);
- if (file != NULL)
- return file_tell(file);
- else
- return -1;
+    struct file *file = process_get_file(fd);
+    if (file != NULL)
+        return file_tell(file);
+    return -1;
 }
 
 void close (int fd)
 {
- process_close_file(fd);
+    process_close_file(fd);
 }
 
+/* Exit System Call */
 void exit(int status)
 {
-    printf("%s: exit(%d)\n", thread_name(), status); 
-    thread_current()->exit_status = status; 
+    struct thread *cur = thread_current();
+    
+    /* 종료 상태 저장 */
+    cur->exit_status = status; 
+    
+    /* 출력은 process_exit()에서 처리됨 */
+    
     thread_exit(); 
 }
 
 void halt(void)
 {
- shutdown_power_off();
+    shutdown_power_off(); // devices/shutdown.h 필요
 }
 
 int wait (pid_t pid)
 {
- return process_wait(pid);
+    return process_wait(pid);
 }
 
 pid_t exec (const char *file)
 {
- check_address(file);
- pid_t pid = process_execute(file);
- if (pid == -1)
- return -1;
- struct thread *child = get_child_process(pid);
- sema_down(&(child->sema_load));
- if (child->is_load)
-  return pid;
- else
-  return -1;
+    check_address((void *)file);
+    
+    /* process_execute 내부에서 로드 대기 후 성공 시 tid 반환 */
+    pid_t pid = process_execute(file);
+    
+    return pid;
 }
 
-static void
-get_argument(int *esp, int *argv, int argc)
-{
-    int i;
-    for(i = 0; i < argc; i++)
-    {
-        // 다음 인자의 주소를 확인 (esp+1)
-        check_address(esp + 1);
-        esp += 1;
-        // 인자 값을 argv 배열에 저장
-        argv[i] = *esp;
-    }
-}
-
-/* userprog/syscall.c */
+/* 메인 핸들러 */
 static void
 syscall_handler (struct intr_frame *f) 
 {
-    // 1. 초기 스택 포인터 유효성 검사 (시스템 콜 번호 주소)
-    check_address(f->esp);
+    /* 스택 포인터 유효성 검사 */
+    check_address(f->esp); // 스택 포인터 자체
 
-    // 2. 시스템 콜 번호 읽기 (스택 최상단)
+    /* 시스템 콜 번호 읽기 */
     int syscall_number = *(int *)f->esp;
     
-    // argv는 최대 3개의 인자를 임시 저장하기 위한 배열입니다.
-    // 인자는 4바이트 단위로 스택에 저장됩니다.
     int argv[3]; 
 
-    // 3. 시스템 콜 번호에 따른 분기 및 인자 처리
     switch(syscall_number)
     {
         case SYS_HALT:
@@ -232,44 +231,60 @@ syscall_handler (struct intr_frame *f)
 
         case SYS_EXEC:
             get_argument(f->esp, argv, 1);
-            f->eax = exec(argv[0]);
+            f->eax = exec((const char *)argv[0]);
             break;
             
         case SYS_WAIT:
             get_argument(f->esp, argv, 1);
-            f->eax = wait(argv[0]);
+            f->eax = wait((pid_t)argv[0]);
             break;
 
         case SYS_CREATE:
             get_argument(f->esp, argv, 2);
-            f->eax = create(argv[0], argv[1]);
+            f->eax = create((const char *)argv[0], (unsigned)argv[1]);
             break;
             
         case SYS_REMOVE:
             get_argument(f->esp, argv, 1);
-            f->eax = remove(argv[0]);
+            f->eax = remove((const char *)argv[0]);
             break;
         
         case SYS_OPEN:
             get_argument(f->esp, argv, 1);
-            f->eax = open(argv[0]);
+            f->eax = open((const char *)argv[0]);
             break;
 
-        // Project 2-2에서 구현할 시스템 콜은 뼈대만 남깁니다.
         case SYS_FILESIZE:
+            get_argument(f->esp, argv, 1);
+            f->eax = filesize(argv[0]);
+            break;
+
         case SYS_READ:
+            get_argument(f->esp, argv, 3);
+            f->eax = read(argv[0], (void *)argv[1], (unsigned)argv[2]);
+            break;
+
         case SYS_WRITE:
+            get_argument(f->esp, argv, 3);
+            f->eax = write(argv[0], (const void *)argv[1], (unsigned)argv[2]);
+            break;
+
         case SYS_SEEK:
+            get_argument(f->esp, argv, 2);
+            seek(argv[0], (unsigned)argv[1]);
+            break;
+
         case SYS_TELL:
+            get_argument(f->esp, argv, 1);
+            f->eax = tell(argv[0]);
+            break;
+
         case SYS_CLOSE:
-            // 이 함수들은 Project 2-2에서 구현되어야 링커 에러가 해결됩니다.
-            // 현재는 링커 에러 방지를 위해 임시로 함수 정의가 필요합니다.
+            get_argument(f->esp, argv, 1);
+            close(argv[0]);
             break;
 
         default:
             exit(-1);
     }
-    // Note: get_argument 함수 내부에서 인자 주소 유효성을 검사해야 합니다.
 }
-
-

@@ -198,28 +198,29 @@ thread_create (const char *name, int priority,
     return TID_ERROR;
 
   /* Initialize thread. */
+  /* 여기서 list_init, sema_init 등 자기 자신에 대한 초기화는 다 끝납니다. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
 
 #ifdef USERPROG
-  /* Project 2: User Program Initialization */
-  t->is_load = false; // program이 load되지 않음 [cite: 406]
-  t->is_exit = false; // process가 종료되지 않음 [cite: 407]
+  /* Project 2: 부모-자식 관계 설정 */
+  /* 주의: init_thread에서는 '나 자신'만 초기화하고, 
+     부모와의 연결은 여기서 해야 안전합니다. */
+  
+  struct thread *curr = thread_current();
+  t->parent = curr; // 부모 설정
 
-  // 세마포어 초기화 (부모-자식 동기화를 위해 0으로 초기화)
-  sema_init(&t->sema_load, 0); 
-  sema_init(&t->sema_exit, 0); 
+  /* 부모의 자식 리스트에 추가 */
+  /* [수정] 변수명 통일: child_list -> children */
+  list_push_back (&curr->children, &t->child_elem);
 
-  // 현재 실행 중인 스레드(부모)의 자식 목록에 새로 생성된 스레드(자식)를 추가
-  list_push_back(&(running_thread()->child_list), &t->child_elem);
-
-  // File Descriptor Table 초기화
-  t->fd_max = 2; // fd 0(stdin), 1(stdout) 다음인 2부터 시작 [cite: 413]
-  t->fd_table = palloc_get_page(PAL_ZERO); // [cite: 414]
+  /* File Descriptor Table 초기화 (Project 2-2) */
+  t->fd_max = 2; // fd 0(stdin), 1(stdout) 다음인 2부터 시작
+  t->fd_table = palloc_get_page(PAL_ZERO); 
 
   if (t->fd_table == NULL)
   {
-    // fd_table 할당 실패 시, 이미 할당된 스레드 구조체 't'도 해제해야 메모리 누수를 막을 수 있습니다.
+    /* fd_table 할당 실패 시 스레드 생성 취소 */
     palloc_free_page(t); 
     return TID_ERROR;
   }
@@ -538,12 +539,25 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
 
-  /* [Project 1-2] 초기화 (변수명 통일됨) */
+  /* [Project 1-2] 초기화 */
   t->original_priority = priority;
   list_init (&t->donations);
   t->waiting_on_lock = NULL;
 
-  list_init(&(t->child_list));
+#ifdef USERPROG
+  /* [Project 2] 자식 리스트 및 세마포어 초기화 */
+  /* [수정] 변수명 통일: child_list -> children */
+  list_init(&(t->children));
+  
+  /* [수정] 변수명 통일: sema_load -> load_sema, sema_exit -> exit_sema */
+  sema_init(&t->load_sema, 0); 
+  sema_init(&t->exit_sema, 0);
+  sema_init(&t->free_sema, 0); /* [추가] 초기값 0 */
+
+  t->exit_status = 0; 
+  t->load_success = false; 
+  t->parent = NULL;
+#endif
 
   t->magic = THREAD_MAGIC;
 

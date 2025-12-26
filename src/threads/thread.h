@@ -21,7 +21,7 @@ typedef int tid_t;
 #define TID_ERROR ((tid_t) -1)          /* Error value for tid_t. */
 
 /* Process identifier type (Project 2 addition). */
-typedef tid_t pid_t; // <-- 이 줄을 추가합니다.
+typedef tid_t pid_t;
 
 /* Thread priorities. */
 #define PRI_MIN 0                       /* Lowest priority. */
@@ -88,15 +88,15 @@ typedef tid_t pid_t; // <-- 이 줄을 추가합니다.
 struct thread
   {
     /* Owned by thread.c. */
-    tid_t tid;                          /* Thread identifier. */
-    enum thread_status status;          /* Thread state. */
-    char name[16];                      /* Name (for debugging purposes). */
-    uint8_t *stack;                     /* Saved stack pointer. */
-    int priority;                       /* Priority. */
-    struct list_elem allelem;           /* List element for all threads list. */
+    tid_t tid;                      /* Thread identifier. */
+    enum thread_status status;      /* Thread state. */
+    char name[16];                  /* Name (for debugging purposes). */
+    uint8_t *stack;                 /* Saved stack pointer. */
+    int priority;                   /* Priority. */
+    struct list_elem allelem;       /* List element for all threads list. */
 
     /* Shared between thread.c and synch.c. */
-    struct list_elem elem;              /* List element. */
+    struct list_elem elem;          /* List element. */
 
     /* [Project 1-1] Alarm Clock */
     int64_t wakeup;
@@ -107,26 +107,31 @@ struct thread
     struct lock *waiting_on_lock;       /* 내가 기다리는 락 */
     struct list_elem elem_for_donation; /* donation 리스트용 elem */
 
-   #ifdef USERPROG
+#ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;          /* Page directory. */
-    struct list_elem child_elem; /* List element for child_list */
-    struct list child_list;      /* List of children */ 
-    
-    bool is_load;               /* thread의 program load 성공 여부 */ 
-    bool is_exit;               /* thread의 종료 여부 */ 
-    int exit_status;            /* thread의 exit status 저장 (여기가 원인입니다) */ 
 
-    struct semaphore sema_load; /* load를 위한 sema */
-    struct semaphore sema_exit; /* exit을 위한 sema */ 
+    /* [Project 2] Process Hierarchy & Synchronization */
+    struct thread *parent;          /* 부모 스레드 포인터 (추가됨) */
+    struct list children;           /* 자식 스레드 리스트 (child_list -> children 통일) */
+    struct list_elem child_elem;    /* 자식 리스트용 elem */
+
+    /* [Project 2] Exit & Load Status */
+    int exit_status;                /* 종료 상태 코드 */
+    bool load_success;              /* 로드 성공 여부 (is_load -> load_success 통일) */
     
-    int fd_max;                 /* file descriptor table에 존재하는 fd값의 최대 */
-    struct file *current_file;  /* 현재 실행중인 file */ 
-    struct file **fd_table;     /* file descriptor table */ 
-   #endif
+    struct semaphore load_sema;     /* 로드 대기 세마포어 (sema_load -> load_sema 통일) */
+    struct semaphore exit_sema;
+    struct semaphore free_sema;     /* 종료 대기 세마포어 (sema_exit -> exit_sema 통일) */
+
+    /* [Project 2-2] File Descriptors */
+    struct file **fd_table;         /* 파일 디스크립터 테이블 */
+    int fd_max;                     /* 현재 최대 FD 값 */
+    struct file *current_file;      /* 현재 실행 중인 파일 (쓰기 방지용) */
+#endif
 
     /* Owned by thread.c. */
-    unsigned magic;                     /* Detects stack overflow. */
+    unsigned magic;                 /* Detects stack overflow. */
   };
 
 /* If false (default), use round-robin scheduler.
