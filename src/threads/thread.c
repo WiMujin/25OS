@@ -524,6 +524,8 @@ is_thread (struct thread *t)
 }
 
 /* Does basic initialization of T as a blocked thread named NAME. */
+/* src/threads/thread.c */
+
 static void
 init_thread (struct thread *t, const char *name, int priority)
 {
@@ -538,28 +540,42 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  
+  /* [수정] magic을 가장 먼저 설정 */
+  t->magic = THREAD_MAGIC;
 
-  /* [Project 1-2] 초기화 */
+  /* [Project 1] 우선순위 스케줄링 초기화 */
   t->original_priority = priority;
   list_init (&t->donations);
   t->waiting_on_lock = NULL;
 
 #ifdef USERPROG
   /* [Project 2] 자식 리스트 및 세마포어 초기화 */
-  /* [수정] 변수명 통일: child_list -> children */
   list_init(&(t->children));
   
-  /* [수정] 변수명 통일: sema_load -> load_sema, sema_exit -> exit_sema */
   sema_init(&t->load_sema, 0); 
   sema_init(&t->exit_sema, 0);
-  sema_init(&t->free_sema, 0); /* [추가] 초기값 0 */
+  sema_init(&t->free_sema, 0);
 
   t->exit_status = 0; 
   t->load_success = false; 
   t->parent = NULL;
-#endif
 
-  t->magic = THREAD_MAGIC;
+  /* [Project 2] 파일 디스크립터 테이블 메모리 할당 */
+  // 주의: palloc_get_page를 써야 실제 저장 공간이 생깁니다!
+  t->fd_table = palloc_get_page(PAL_ZERO); 
+  
+  if (t->fd_table == NULL) {
+      // 메모리 할당 실패 시 처리 (보통 커널 패닉이나 에러 처리)
+      // 여기서는 일단 넘어갑니다.
+  }
+
+  /* STDIN(0), STDOUT(1)은 예약되어 있으므로 2부터 시작 */
+  /* 구조체에 int next_fd; 라고 선언했으면 아래 변수명을 next_fd로 맞추세요 */
+  t->next_fd = 2;  
+  
+  t->current_file = NULL; // 실행 중인 파일 포인터 초기화
+#endif
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);

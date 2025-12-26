@@ -75,7 +75,6 @@ process_execute (const char *file_name)
     }
     return tid;
 }
-
 /* A thread function that loads a user process and starts it running. */
 static void
 start_process (void *file_name_)
@@ -271,22 +270,47 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+  /* 1. 종료 메시지 출력 (필수 요구사항) */
   printf ("%s: exit(%d)\n", cur->name, cur->exit_status);
 
-  /* FD 테이블 정리 (선택사항, 메모리 누수 방지용) */
-  // for(int i=2; i<cur->fd_max; i++) if(cur->fd_table[i]) file_close(cur->fd_table[i]);
-  // palloc_free_page(cur->fd_table);
+  /* 2. [추가] 열린 파일 닫기 및 FD 테이블 메모리 해제 */
+  if (cur->fd_table != NULL) 
+    {
+      /* 0, 1은 예약, 2부터 시작. 
+         안전을 위해 128(또는 fd_max)까지 돌며 NULL이 아닌 것만 닫음 */
+      for (int i = 2; i < 128; i++) 
+        {
+          if (cur->fd_table[i] != NULL) 
+            {
+              file_close (cur->fd_table[i]);
+              cur->fd_table[i] = NULL;
+            }
+        }
+      palloc_free_page (cur->fd_table); // 페이지 할당 해제
+      cur->fd_table = NULL; // 댕글링 포인터 방지
+    }
 
+  /* 3. 실행 중인 파일 닫기 (write deny 해제) */
+  if (cur->current_file != NULL) 
+    {
+      file_close (cur->current_file);
+      cur->current_file = NULL;
+    }
+
+  /* 4. 메모리 정리 (페이지 디렉토리 파괴) */
   pd = cur->pagedir;
   if (pd != NULL) 
     {
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
-      
-      sema_up(&cur->exit_sema); // 부모에게 종료 알림
-      sema_down(&cur->free_sema); // 부모가 허락할 때까지 대기
     }
+
+  /* 5. 부모 프로세스와의 동기화 */
+  /* 주의: 페이지 디렉토리 유무와 상관없이 항상 수행해야 함 */
+  sema_up (&cur->exit_sema);   // 부모에게 "나 죽는다" 알림
+  sema_down (&cur->free_sema); // 부모가 exit_status를 가져갈 때까지 대기
 }
 
 void

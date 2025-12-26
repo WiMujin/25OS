@@ -132,6 +132,8 @@ struct thread
 
     /* Owned by thread.c. */
     unsigned magic;                 /* Detects stack overflow. */
+    struct file **fd_table;             /* 파일 포인터 배열 (동적 할당 예정) */
+    int next_fd;                        /* 다음에 할당할 fd 번호 */
   };
 
 /* If false (default), use round-robin scheduler.
