@@ -232,14 +232,22 @@ pid_t exec (const char *file)
 
 /* --- Main Handler --- */
 
-static void
+void
 syscall_handler (struct intr_frame *f) 
 {
-    /* 1. 스택 포인터(ESP) 자체 유효성 검사 */
+    /* 1. 스택 포인터(ESP) 유효성 검사 */
     check_address(f->esp); 
 
-    int syscall_number = *(int *)f->esp;
-    int argv[3]; // 인자는 최대 3개까지 사용됨
+    int *argv = (int *)f->esp; // 인자 배열 포인터
+    int syscall_number = argv[0]; // 시스템 콜 번호
+
+    /* 2. 변수 일괄 선언 (Switch 문 내부 선언 금지) */
+    struct thread *cur = thread_current();
+    int fd;
+    void *buffer;
+    unsigned size;
+    unsigned position;
+    struct file *file;
 
     switch(syscall_number)
     {
@@ -248,101 +256,169 @@ syscall_handler (struct intr_frame *f)
             break;
             
         case SYS_EXIT:
-            get_argument(f->esp, argv, 1);
-            exit(argv[0]);
+            if (!is_user_vaddr((void *)(argv + 1))) exit(-1);
+            exit(argv[1]);
             break;
 
         case SYS_EXEC:
-            get_argument(f->esp, argv, 1);
-            // exec 구현 전이면 -1 리턴하거나 주석 처리
-            f->eax = exec((const char *)argv[0]);
+            if (!is_user_vaddr((void *)(argv + 1))) exit(-1);
+            f->eax = exec((const char *)argv[1]);
             break;
             
         case SYS_WAIT:
-            get_argument(f->esp, argv, 1);
-            // wait 구현 전이면 -1 리턴하거나 주석 처리
-            f->eax = wait((pid_t)argv[0]);
+            if (!is_user_vaddr((void *)(argv + 1))) exit(-1);
+            f->eax = wait((pid_t)argv[1]);
             break;
 
-        /* --- [수정됨] CREATE 구현 --- */
         case SYS_CREATE:
-            get_argument(f->esp, argv, 2);
-            // argv[0]: 파일 이름 포인터, argv[1]: 사이즈
+            // 인자: [1]filename, [2]initial_size
+            if (!is_user_vaddr((void *)(argv + 2))) exit(-1);
+            check_address((void *)argv[1]);
             
-            // 파일 이름 포인터가 유효한지 검사
-            check_address((void *)argv[0]);
-            
-            // 파일 이름이 NULL이면 종료
-            if ((const char *)argv[0] == NULL) {
-                exit(-1);
-            }
+            if ((const char *)argv[1] == NULL) exit(-1);
 
-            // 파일 생성 시도 및 결과 반환
-            f->eax = filesys_create((const char *)argv[0], (unsigned)argv[1]);
+            lock_acquire(&filesys_lock);
+            f->eax = filesys_create((const char *)argv[1], (unsigned)argv[2]);
+            lock_release(&filesys_lock);
             break;
             
-        /* --- [수정됨] REMOVE 구현 --- */
         case SYS_REMOVE:
-            get_argument(f->esp, argv, 1);
-            // argv[0]: 파일 이름 포인터
+            if (!is_user_vaddr((void *)(argv + 1))) exit(-1);
+            check_address((void *)argv[1]);
+            
+            if ((const char *)argv[1] == NULL) exit(-1);
 
-            // 파일 이름 포인터가 유효한지 검사
-            check_address((void *)argv[0]);
-
-            if ((const char *)argv[0] == NULL) {
-                exit(-1);
-            }
-
-            // 파일 삭제 시도 및 결과 반환
-            f->eax = filesys_remove((const char *)argv[0]);
+            lock_acquire(&filesys_lock);
+            f->eax = filesys_remove((const char *)argv[1]);
+            lock_release(&filesys_lock);
             break;
         
         case SYS_OPEN:
-            get_argument(f->esp, argv, 1);
-            f->eax = open((const char *)argv[0]);
-            break;
+            if (!is_user_vaddr((void *)(argv + 1))) exit(-1);
+            check_address((void *)argv[1]);
+            
+            if ((const char *)argv[1] == NULL) exit(-1);
 
+            lock_acquire(&filesys_lock);
+            file = filesys_open((const char *)argv[1]);
+            
+            if (file == NULL) {
+                f->eax = -1;
+            } else {
+                // 빈 FD 찾기 (2부터 시작)
+                fd = 2;
+                while (fd < 128) {
+                    if (cur->fd_table[fd] == NULL) break;
+                    fd++;
+                }
+
+                if (fd >= 128) {
+                    file_close(file);
+                    f->eax = -1;
+                } else {
+                    cur->fd_table[fd] = file;
+                    if (fd >= cur->fd_max) cur->fd_max = fd + 1;
+                    f->eax = fd;
+                }
+            }
+            lock_release(&filesys_lock);
+            break;
+        
         case SYS_FILESIZE:
-            get_argument(f->esp, argv, 1);
-            f->eax = filesize(argv[0]);
+            if (!is_user_vaddr((void *)(argv + 1))) exit(-1);
+            fd = argv[1];
+            
+            lock_acquire(&filesys_lock);
+            if (fd >= 2 && fd < 128 && cur->fd_table[fd] != NULL) {
+                f->eax = file_length(cur->fd_table[fd]);
+            } else {
+                f->eax = -1;
+            }
+            lock_release(&filesys_lock);
             break;
 
         case SYS_READ:
-            get_argument(f->esp, argv, 3);
-            f->eax = read(argv[0], (void *)argv[1], (unsigned)argv[2]);
+            // 인자: [1]fd, [2]buffer, [3]size
+            if (!is_user_vaddr((void *)(argv + 3))) exit(-1);
+            fd = argv[1];
+            buffer = (void *)argv[2];
+            size = argv[3];
+
+            check_address(buffer);
+            lock_acquire(&filesys_lock);
+
+            if (fd == 0) { // STDIN
+                unsigned i;
+                uint8_t *buf = (uint8_t *)buffer;
+                for (i = 0; i < size; i++) {
+                    buf[i] = input_getc();
+                }
+                f->eax = size;
+            } else if (fd >= 2 && fd < 128 && cur->fd_table[fd] != NULL) { // FILE
+                f->eax = file_read(cur->fd_table[fd], buffer, size);
+            } else {
+                f->eax = -1;
+            }
+            lock_release(&filesys_lock);
             break;
 
         case SYS_WRITE:
-            get_argument(f->esp, argv, 3);
-            // argv[0]: fd, argv[1]: buffer 주소, argv[2]: size
-            
-            check_address((void *)argv[1]); // 버퍼 주소 체크
+            // 인자: [1]fd, [2]buffer, [3]size
+            if (!is_user_vaddr((void *)(argv + 3))) exit(-1);
+            fd = argv[1];
+            buffer = (void *)argv[2];
+            size = argv[3];
 
-            // fd == 1 (STDOUT) 일 때만 화면에 출력
-            if (argv[0] == 1) {
-                // putbuf: 화면에 문자열을 뿌리는 핀토스 함수
-                putbuf((const char *)argv[1], (unsigned)argv[2]); 
-                f->eax = argv[2]; // 출력한 바이트 수 반환
-            } 
-            else {
-                // 파일 쓰기는 아직 구현 안 함 (0 반환)
-                f->eax = 0; 
+            check_address(buffer);
+            lock_acquire(&filesys_lock);
+
+            if (fd == 1) { // STDOUT
+                putbuf((const char *)buffer, size);
+                f->eax = size;
+            } else if (fd >= 2 && fd < 128 && cur->fd_table[fd] != NULL) { // FILE
+                // [심화] 쓰기 권한 체크는 별도로 필요할 수 있음
+                f->eax = file_write(cur->fd_table[fd], buffer, size);
+            } else {
+                f->eax = 0; // 실패 시 0
             }
+            lock_release(&filesys_lock);
             break;
 
         case SYS_SEEK:
-            get_argument(f->esp, argv, 2);
-            seek(argv[0], (unsigned)argv[1]);
+            if (!is_user_vaddr((void *)(argv + 2))) exit(-1);
+            fd = argv[1];
+            position = argv[2];
+            
+            lock_acquire(&filesys_lock);
+            if (fd >= 2 && fd < 128 && cur->fd_table[fd] != NULL) {
+                file_seek(cur->fd_table[fd], position);
+            }
+            lock_release(&filesys_lock);
             break;
 
         case SYS_TELL:
-            get_argument(f->esp, argv, 1);
-            f->eax = tell(argv[0]);
+            if (!is_user_vaddr((void *)(argv + 1))) exit(-1);
+            fd = argv[1];
+            
+            lock_acquire(&filesys_lock);
+            if (fd >= 2 && fd < 128 && cur->fd_table[fd] != NULL) {
+                f->eax = file_tell(cur->fd_table[fd]);
+            } else {
+                f->eax = -1;
+            }
+            lock_release(&filesys_lock);
             break;
 
         case SYS_CLOSE:
-            get_argument(f->esp, argv, 1);
-            close(argv[0]);
+            if (!is_user_vaddr((void *)(argv + 1))) exit(-1);
+            fd = argv[1];
+            
+            lock_acquire(&filesys_lock);
+            if (fd >= 2 && fd < 128 && cur->fd_table[fd] != NULL) {
+                file_close(cur->fd_table[fd]);
+                cur->fd_table[fd] = NULL;
+            }
+            lock_release(&filesys_lock);
             break;
 
         default:

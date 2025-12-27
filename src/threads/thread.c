@@ -198,32 +198,31 @@ thread_create (const char *name, int priority,
     return TID_ERROR;
 
   /* Initialize thread. */
-  /* 여기서 list_init, sema_init 등 자기 자신에 대한 초기화는 다 끝납니다. */
+  /* init_thread에서는 fd_table을 NULL로만 초기화합니다. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
 
 #ifdef USERPROG
-  /* Project 2: 부모-자식 관계 설정 */
-  /* 주의: init_thread에서는 '나 자신'만 초기화하고, 
-     부모와의 연결은 여기서 해야 안전합니다. */
+  /* [Project 2] 파일 디스크립터 테이블 메모리 할당 */
+  /* 부모 리스트에 넣기 전에 먼저 할당을 시도하는 것이 안전합니다. */
+  t->fd_table = palloc_get_page(PAL_ZERO);
   
+  if (t->fd_table == NULL) 
+  {
+      /* 할당 실패 시 즉시 해제하고 에러 리턴 */
+      palloc_free_page(t);
+      return TID_ERROR;
+  }
+  
+  /* fd 0(stdin), 1(stdout)은 예약됨 -> 2부터 시작 */
+  t->fd_max = 2; 
+
+  /* [Project 2] 부모-자식 관계 설정 */
   struct thread *curr = thread_current();
   t->parent = curr; // 부모 설정
 
   /* 부모의 자식 리스트에 추가 */
-  /* [수정] 변수명 통일: child_list -> children */
   list_push_back (&curr->children, &t->child_elem);
-
-  /* File Descriptor Table 초기화 (Project 2-2) */
-  t->fd_max = 2; // fd 0(stdin), 1(stdout) 다음인 2부터 시작
-  t->fd_table = palloc_get_page(PAL_ZERO); 
-
-  if (t->fd_table == NULL)
-  {
-    /* fd_table 할당 실패 시 스레드 생성 취소 */
-    palloc_free_page(t); 
-    return TID_ERROR;
-  }
 #endif
 
   /* Stack frame for kernel_thread(). */
@@ -243,9 +242,6 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
-
-  /* [Project 1-2] 스레드 생성 직후 선점 확인 */
-  check_preemption ();
 
   return tid;
 }
@@ -541,7 +537,7 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   
-  /* [수정] magic을 가장 먼저 설정 */
+  /* [Project 1] 매직 넘버 설정 */
   t->magic = THREAD_MAGIC;
 
   /* [Project 1] 우선순위 스케줄링 초기화 */
@@ -561,20 +557,11 @@ init_thread (struct thread *t, const char *name, int priority)
   t->load_success = false; 
   t->parent = NULL;
 
-  /* [Project 2] 파일 디스크립터 테이블 메모리 할당 */
-  // 주의: palloc_get_page를 써야 실제 저장 공간이 생깁니다!
-  t->fd_table = palloc_get_page(PAL_ZERO); 
-  
-  if (t->fd_table == NULL) {
-      // 메모리 할당 실패 시 처리 (보통 커널 패닉이나 에러 처리)
-      // 여기서는 일단 넘어갑니다.
-  }
-
-  /* STDIN(0), STDOUT(1)은 예약되어 있으므로 2부터 시작 */
-  /* 구조체에 int next_fd; 라고 선언했으면 아래 변수명을 next_fd로 맞추세요 */
-  t->next_fd = 2;  
-  
-  t->current_file = NULL; // 실행 중인 파일 포인터 초기화
+  /* [Project 2] 파일 디스크립터 초기화 */
+  /* 중요: 여기서 palloc을 하면 커널 부팅 시 패닉이 발생하므로 NULL로 초기화만 함 */
+  t->fd_table = NULL;  
+  t->fd_max = 2;       
+  t->current_file = NULL; 
 #endif
 
   old_level = intr_disable ();

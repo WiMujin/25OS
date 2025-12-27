@@ -279,7 +279,7 @@ process_exit (void)
     {
       /* 0, 1은 예약, 2부터 시작. 
          안전을 위해 128(또는 fd_max)까지 돌며 NULL이 아닌 것만 닫음 */
-      for (int i = 2; i < 128; i++) 
+      for (int i = 2; i < cur->fd_max; i++) 
         {
           if (cur->fd_table[i] != NULL) 
             {
