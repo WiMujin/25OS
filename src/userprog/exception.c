@@ -4,6 +4,8 @@
 #include "userprog/gdt.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "userprog/syscall.h"
+#include "threads/vaddr.h"
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -151,6 +153,12 @@ page_fault (struct intr_frame *f)
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
      which fault_addr refers. */
+  /* [수정] 잘못된 메모리 접근 발생 시 프로세스 종료 */
+  /* 커널 모드일지라도 유저 주소 영역에서 발생한 fault라면 유저 프로세스의 잘못임 */
+  if (user || is_user_vaddr(fault_addr))
+  {
+      exit(-1);
+  }
   printf ("Page fault at %p: %s error %s page in %s context.\n",
           fault_addr,
           not_present ? "not present" : "rights violation",

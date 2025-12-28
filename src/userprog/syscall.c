@@ -337,7 +337,7 @@ syscall_handler (struct intr_frame *f)
             lock_release(&filesys_lock);
             break;
 
-        case SYS_READ:
+       case SYS_READ:
             // 인자: [1]fd, [2]buffer, [3]size
             if (!is_user_vaddr((void *)(argv + 3))) exit(-1);
             fd = argv[1];
@@ -345,6 +345,13 @@ syscall_handler (struct intr_frame *f)
             size = argv[3];
 
             check_address(buffer);
+            
+            /* [수정] 버퍼의 끝 주소도 유효한지 검사 (bad-read2 해결용) */
+            if (size > 0) 
+            {
+                check_address((char *)buffer + size - 1);
+            }
+
             lock_acquire(&filesys_lock);
 
             if (fd == 0) { // STDIN
@@ -370,20 +377,26 @@ syscall_handler (struct intr_frame *f)
             size = argv[3];
 
             check_address(buffer);
+            
+            /* [수정] 버퍼의 끝 주소도 유효한지 검사 (bad-write2 해결용) */
+            if (size > 0) 
+            {
+                check_address((char *)buffer + size - 1);
+            }
+
             lock_acquire(&filesys_lock);
 
             if (fd == 1) { // STDOUT
                 putbuf((const char *)buffer, size);
                 f->eax = size;
             } else if (fd >= 2 && fd < 128 && cur->fd_table[fd] != NULL) { // FILE
-                // [심화] 쓰기 권한 체크는 별도로 필요할 수 있음
                 f->eax = file_write(cur->fd_table[fd], buffer, size);
             } else {
                 f->eax = 0; // 실패 시 0
             }
             lock_release(&filesys_lock);
             break;
-
+            
         case SYS_SEEK:
             if (!is_user_vaddr((void *)(argv + 2))) exit(-1);
             fd = argv[1];
