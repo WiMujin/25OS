@@ -546,13 +546,18 @@ init_thread (struct thread *t, const char *name, int priority)
   t->waiting_on_lock = NULL;
 
 #ifdef USERPROG
-  /* [Project 2] 자식 리스트 및 세마포어 초기화 */
-  list_init(&(t->children));
+  /* [Project 2] 자식 리스트 초기화 */
+  list_init (&t->children);
   
-  sema_init(&t->load_sema, 0); 
-  sema_init(&t->exit_sema, 0);
-  sema_init(&t->free_sema, 0);
+  /* [Project 2] 세마포어 초기화 */
+  /* 중요: 0으로 초기화해야 down(wait) 했을 때 대기 상태가 됩니다. */
+  sema_init (&t->wait_sema, 0); 
+  sema_init (&t->load_sema, 0); 
+  
+  /* 부모가 exit_status를 가져갈 때까지 대기하기 위한 세마포어 */
+  sema_init (&t->free_sema, 0);
 
+  /* [Project 2] 프로세스 상태 초기화 */
   t->exit_status = 0; 
   t->load_success = false; 
   t->parent = NULL;
@@ -561,7 +566,9 @@ init_thread (struct thread *t, const char *name, int priority)
   /* 중요: 여기서 palloc을 하면 커널 부팅 시 패닉이 발생하므로 NULL로 초기화만 함 */
   t->fd_table = NULL;  
   t->fd_max = 2;       
-  t->current_file = NULL; 
+  
+  /* [Project 2] 실행 중인 파일 포인터 */
+  t->running_file = NULL; 
 #endif
 
   old_level = intr_disable ();

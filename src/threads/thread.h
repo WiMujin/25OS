@@ -111,25 +111,28 @@ struct thread
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;          /* Page directory. */
 
-    /* [Project 2] Process Hierarchy & Synchronization */
-    struct thread *parent;          /* 부모 스레드 포인터 */
-    struct list children;           /* 자식 스레드 리스트 */
-    struct list_elem child_elem;    /* 자식 리스트용 elem */
+    /* [Project 2] Process Hierarchy (족보 관리) */
+    struct thread *parent;           /* 나의 부모 스레드 */
+    struct list children;            /* 나의 자식 스레드 리스트 */
+    struct list_elem child_elem;     /* 자식 리스트에 매달릴 나의 연결고리 */
 
-    /* [Project 2] Exit & Load Status */
-    int exit_status;                /* 종료 상태 코드 */
-    bool load_success;              /* 로드 성공 여부 */
+    /* [Project 2] Synchronization & Status (연락 및 상태) */
+    int exit_status;                 /* 자식의 종료 상태 (유언) */
+    struct semaphore wait_sema;      /* 자식이 죽을 때까지 부모가 기다리는 곳 */
     
-    struct semaphore load_sema;     /* 로드 대기 세마포어 */
-    struct semaphore exit_sema;
-    struct semaphore free_sema;     /* 종료 대기 세마포어 */
+    /* [추가됨] 부모가 유언(exit_status)을 가져갈 때까지 자식이 기다리는 곳 🌟 */
+    struct semaphore free_sema;      
 
-    /* [Project 2-2] File Descriptors */
-    struct file **fd_table;         /* 파일 디스크립터 테이블 */
-    int fd_max;                   
-    struct file *current_file;      /* 현재 실행 중인 파일 (쓰기 방지용) */
+    struct semaphore load_sema;      /* 자식 생성(exec)이 끝날 때까지 부모가 기다리는 곳 */
+    bool load_success;               /* 자식의 프로그램 탑재 성공 여부 */
+
+    /* [Project 2] File Descriptors (파일 관리) */
+    struct file **fd_table;          /* 파일 디스크립터 테이블 */
+    int fd_max;                      /* 현재 할당된 FD 최대값 */
+    
+    /* [Project 2] Deny Write on Executables */
+    struct file *running_file;       /* 현재 실행 중인 파일 (실행 중 쓰기 금지용) */
 #endif
-
     /* Owned by thread.c. */
     unsigned magic;                 /* Detects stack overflow. */
     

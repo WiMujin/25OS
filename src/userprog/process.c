@@ -31,50 +31,71 @@ void remove_child_process(struct thread *child);
 tid_t
 process_execute (const char *file_name) 
 {
-    char *command_line;
-    char *name;
-    char *remain;
-    tid_t tid;
+  char *fn_copy;
+  tid_t tid;
 
-    /* 1. command_line 메모리 할당 및 복사 */
-    command_line = palloc_get_page (0);
-    if (command_line == NULL)
-        return TID_ERROR;
-    strlcpy (command_line, file_name, PGSIZE);
+  /* 1. 실행 파일 이름의 사본 생성 (커널 스택용) */
+  fn_copy = palloc_get_page (0);
+  if (fn_copy == NULL)
+    return TID_ERROR;
+  strlcpy (fn_copy, file_name, PGSIZE);
 
-    /* 2. name 메모리 할당 및 복사 */
-    name = palloc_get_page(0);
-    if (name == NULL) {
-        palloc_free_page(command_line);
-        return TID_ERROR;
+  /* 2. 스레드 이름을 파싱하기 위한 임시 사본 생성 */
+  /* file_name을 직접 strtok 하면 원본이 망가질 수 있어 사본 사용 */
+  char *name_copy = palloc_get_page(0);
+  if (name_copy == NULL) {
+      palloc_free_page(fn_copy);
+      return TID_ERROR;
+  }
+  strlcpy(name_copy, file_name, PGSIZE);
+
+  char *save_ptr;
+  char *prog_name = strtok_r(name_copy, " ", &save_ptr);
+
+  /* 3. 스레드 생성 (prog_name: 프로그램 이름, fn_copy: 전체 인자) */
+  tid = thread_create (prog_name, PRI_DEFAULT, start_process, fn_copy);
+  
+  /* 임시 사본 해제 */
+  palloc_free_page(name_copy);
+
+  if (tid == TID_ERROR)
+    {
+      palloc_free_page (fn_copy);
+      return TID_ERROR;
     }
-    strlcpy (name, file_name, PGSIZE);
 
-    /* 3. Name Parsing */
-    char *program_name = strtok_r(name, " ", &remain);
+  /* 🌟 [동기화] 자식 프로세스가 로드될 때까지 대기 🌟 */
+  struct thread *cur = thread_current();
+  struct thread *child = NULL;
+  struct list_elem *e;
 
-    /* 4. Thread 생성 */
-    tid = thread_create (program_name, PRI_DEFAULT, start_process, command_line);
-
-    /* 5. 메모리 해제 */
-    palloc_free_page(name); 
-
-    if (tid == TID_ERROR) {
-        palloc_free_page (command_line);
-        return TID_ERROR;
-    }
-
-    /* 자식 스레드 찾기 및 로드 대기 */
-    struct thread *child = get_child_process(tid);
-    if (child != NULL) {
-        sema_down(&child->load_sema);
-
-        if (!child->load_success) {
-            return TID_ERROR; 
+  /* 자식 리스트 탐색 (get_child_process 로직 내장) */
+  for (e = list_begin (&cur->children); e != list_end (&cur->children); e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, child_elem);
+      if (t->tid == tid)
+        {
+          child = t;
+          break;
         }
     }
-    return tid;
+
+  /* 자식을 찾았으면 로드 대기 */
+  if (child != NULL) 
+    {
+      /* start_process에서 load가 끝날 때까지 여기서 대기 */
+      sema_down (&child->load_sema); 
+      
+      /* 로드 실패했다면 -1(TID_ERROR) 반환 */
+      if (!child->load_success) 
+        {
+          return TID_ERROR;
+        }
+    }
+
+  return tid;
 }
+
 /* A thread function that loads a user process and starts it running. */
 static void
 start_process (void *file_name_)
@@ -87,14 +108,17 @@ start_process (void *file_name_)
     char **argv;
     int argc = 0;
     
+    /* 메모리 할당 */
     argv = palloc_get_page(0);
     if (argv == NULL)
     {
         palloc_free_page(command_line);
-        exit(-1);
+        thread_current()->exit_status = -1;
+        thread_exit();
     }
 
     /* 1. Argument Parsing */
+    /* 커맨드 라인을 공백 기준으로 쪼개서 argv 배열에 저장 */
     for (argv[argc] = strtok_r (command_line, " ", &remain);
          argv[argc] != NULL;
          argv[argc] = strtok_r (NULL, " ", &remain))
@@ -108,39 +132,38 @@ start_process (void *file_name_)
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
 
-    /* 3. Load 실행 */
+    /* 3. Load 실행 (실행 파일 메모리 적재) */
     success = load (argv[0], &if_.eip, &if_.esp);
     
-    /* 4. 부모 프로세스 동기화 */
+    /* 🌟 [4. 부모 프로세스 동기화] 🌟 */
+    /* 로드 결과를 기록하고, 기다리고 있는 부모(process_execute)를 깨움 */
     thread_current()->load_success = success;
     sema_up(&thread_current()->load_sema);
 
-    /* 5. Load 성공 시 Stack 구성 */
+    /* 5. Load 성공 시 Stack 구성 (Argument Passing) */
     if (success)
     {
         int arg_len = 0;
         int total_len = 0;
         int start = argc - 1;
 
-        /* [A] 문자열을 스택에 저장 (역순) */
-        /* save_to_stack 헬퍼 제거하고 직접 제어하여 버그 방지 */
+        /* [A] 문자열 데이터를 스택에 저장 (역순) */
         for(int i = start; i >= 0; i--)
         {
-            arg_len = strlen(argv[i]) + 1;
-            if_.esp -= arg_len;           // 스택 공간 확보
-            memcpy(if_.esp, argv[i], arg_len); // 문자열 복사
-            argv[i] = if_.esp;            // 스택 상의 주소 저장
+            arg_len = strlen(argv[i]) + 1; // NULL 문자 포함
+            if_.esp -= arg_len;            // 스택 포인터 이동
+            memcpy(if_.esp, argv[i], arg_len); // 데이터 복사
+            argv[i] = if_.esp;             // 스택상의 주소를 argv에 갱신
             total_len += arg_len;
         }
 
         /* [B] Word Align (4바이트 정렬) */
-        /* 여기가 문제였습니다! memset으로 정확히 필요한 만큼만 0을 채웁니다. */
         int remainder = total_len % 4;
         if (remainder != 0)
         {
             int padding = 4 - remainder;
             if_.esp -= padding;
-            memset(if_.esp, 0, padding); // 0으로 채움
+            memset(if_.esp, 0, padding); // 패딩 0으로 채움
         }
 
         /* [C] NULL Pointer Sentinel (argv[argc] = NULL) */
@@ -167,11 +190,11 @@ start_process (void *file_name_)
         if_.esp -= 4;
         *(void **)if_.esp = NULL;
 
-        /* 6. 메모리 해제 */
+        /* 6. 메모리 해제 (임시 버퍼 정리) */
         palloc_free_page(argv);
         palloc_free_page(command_line);
 
-        /* Context Switch */
+        /* Context Switch (사용자 모드로 전환) */
         asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
         NOT_REACHED ();
     }
@@ -181,7 +204,10 @@ start_process (void *file_name_)
     {
         palloc_free_page(argv);
         palloc_free_page(command_line);
-        exit(-1);
+        
+        /* 로드 실패 상태로 종료 */
+        thread_current()->exit_status = -1;
+        thread_exit();
     }
 }
 
@@ -224,18 +250,42 @@ struct file *process_get_file (int fd)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
-  struct thread *child = get_child_process(child_tid);
+  struct thread *cur = thread_current ();
+  struct thread *child = NULL;
+  struct list_elem *e;
 
-  if (child == NULL) {
+  /* 1. 자식 리스트를 검색하여 child_tid에 해당하는 스레드 찾기 */
+  for (e = list_begin (&cur->children); e != list_end (&cur->children); e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, child_elem);
+      if (t->tid == child_tid)
+        {
+          child = t;
+          break;
+        }
+    }
+
+  /* 2. 자식이 없으면 -1 반환 (내 자식이 아니거나 이미 종료됨) */
+  if (child == NULL) 
+    {
       return -1;
-  }
+    }
 
-  sema_down(&child->exit_sema);
+  /* 3. 자식이 종료될 때까지 대기 (wait_sema) */
+  /* 자식의 process_exit에서 sema_up 할 때까지 여기서 멈춤 */
+  sema_down (&child->wait_sema);
 
+  /* 4. 자식의 종료 상태 가져오기 (자식은 현재 free_sema에서 대기 중이라 메모리 안전함) */
   int exit_status = child->exit_status;
-  remove_child_process(child);
-  sema_up(&child->free_sema); // 자식 소멸 허용
 
+  /* 5. 자식 리스트에서 제거 (더 이상 관리하지 않음) */
+  list_remove (&child->child_elem);
+
+  /* 6. [추가] 자식에게 "이제 죽어도 좋아" 신호 보냄  */
+  /* 이 신호를 보내야 자식이 process_exit의 대기 상태를 풀고 소멸됨 */
+  sema_up (&child->free_sema);
+
+  /* 7. 종료 상태 반환 */
   return exit_status;
 }
 
@@ -271,14 +321,16 @@ process_exit (void)
   struct thread *cur = thread_current ();
   uint32_t *pd;
 
-  /* 1. 종료 메시지 출력 (필수 요구사항) */
-  printf ("%s: exit(%d)\n", cur->name, cur->exit_status);
+  /* 1. 현재 실행 중인 파일 닫기 (쓰기 방지 해제) */
+  if (cur->running_file != NULL) 
+    {
+      file_close (cur->running_file);
+      cur->running_file = NULL;
+    }
 
-  /* 2. [추가] 열린 파일 닫기 및 FD 테이블 메모리 해제 */
+  /* 2. 열려 있는 모든 파일 닫기 및 FD 테이블 메모리 해제 */
   if (cur->fd_table != NULL) 
     {
-      /* 0, 1은 예약, 2부터 시작. 
-         안전을 위해 128(또는 fd_max)까지 돌며 NULL이 아닌 것만 닫음 */
       for (int i = 2; i < cur->fd_max; i++) 
         {
           if (cur->fd_table[i] != NULL) 
@@ -287,18 +339,36 @@ process_exit (void)
               cur->fd_table[i] = NULL;
             }
         }
-      palloc_free_page (cur->fd_table); // 페이지 할당 해제
-      cur->fd_table = NULL; // 댕글링 포인터 방지
+      palloc_free_page (cur->fd_table); 
+      cur->fd_table = NULL; 
     }
 
-  /* 3. 실행 중인 파일 닫기 (write deny 해제) */
-  if (cur->current_file != NULL) 
+  /* 3. 종료 메시지 출력 */
+  printf ("%s: exit(%d)\n", cur->name, cur->exit_status);
+
+  /* 4. 부모에게 "나 죽는다" 알림 (wait_sema up) */
+  /* 부모가 process_wait에서 자고 있다면 여기서 깨어남 */
+  sema_up (&cur->wait_sema); 
+
+  /*  5. 자식 프로세스들 놓아주기 (고아 처리)  */
+  /* 내가 죽으면 자식들이 나중에 나한테 보고할 방법이 없으므로 미리 풀어줌 */
+  struct list_elem *e;
+  for (e = list_begin (&cur->children); e != list_end (&cur->children); e = list_next (e))
     {
-      file_close (cur->current_file);
-      cur->current_file = NULL;
+      struct thread *t = list_entry (e, struct thread, child_elem);
+      sema_up (&t->free_sema); // 자식아, 기다리지 말고 가라
     }
 
-  /* 4. 메모리 정리 (페이지 디렉토리 파괴) */
+  /* 🌟 6. [추가] 부모가 내 정보를 가져갈 때까지 대기 (Page Fault 방지 핵심) 🌟 */
+  /* 부모가 process_wait에서 sema_up(&child->free_sema)를 해줄 때까지 대기 */
+  /* 단, 부모가 이미 죽었거나 NULL이라면 기다리지 않음 */
+  if (cur->parent != NULL) 
+    {
+      sema_down (&cur->free_sema);
+    }
+
+  /* 7. 메모리 정리 (페이지 디렉토리 파괴) */
+  /* 위에서 기다려주지 않으면, 부모가 읽기도 전에 여기서 메모리가 날아감 -> Kernel Panic */
   pd = cur->pagedir;
   if (pd != NULL) 
     {
@@ -306,11 +376,6 @@ process_exit (void)
       pagedir_activate (NULL);
       pagedir_destroy (pd);
     }
-
-  /* 5. 부모 프로세스와의 동기화 */
-  /* 주의: 페이지 디렉토리 유무와 상관없이 항상 수행해야 함 */
-  sema_up (&cur->exit_sema);   // 부모에게 "나 죽는다" 알림
-  sema_down (&cur->free_sema); // 부모가 exit_status를 가져갈 때까지 대기
 }
 
 void
@@ -388,11 +453,13 @@ load (const char *file_name, void (**eip) (void), void **esp)
   bool success = false;
   int i;
 
+  /* 페이지 디렉토리 생성 */
   t->pagedir = pagedir_create ();
   if (t->pagedir == NULL) 
     goto done;
   process_activate ();
 
+  /* 파일 열기 */
   file = filesys_open (file_name);
   if (file == NULL) 
     {
@@ -400,6 +467,11 @@ load (const char *file_name, void (**eip) (void), void **esp)
       goto done; 
     }
 
+  /* 🌟 [수정 1] 현재 실행 중인 파일은 쓰기 금지 설정 및 저장 🌟 */
+  t->running_file = file;
+  file_deny_write (file);
+
+  /* ELF 헤더 검사 */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
       || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
       || ehdr.e_type != 2
@@ -412,6 +484,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
       goto done; 
     }
 
+  /* 프로그램 헤더 읽기 및 세그먼트 로드 */
   file_ofs = ehdr.e_phoff;
   for (i = 0; i < ehdr.e_phnum; i++) 
     {
@@ -465,14 +538,22 @@ load (const char *file_name, void (**eip) (void), void **esp)
         }
     }
 
+  /* 스택 설정 */
   if (!setup_stack (esp))
     goto done;
 
+  /* 엔트리 포인트 설정 및 성공 표시 */
   *eip = (void (*) (void)) ehdr.e_entry;
   success = true;
 
  done:
-  file_close (file);
+  /* 🌟 [수정 2] 로드에 성공했다면 파일 닫지 않음 (쓰기 금지 유지) 🌟 */
+  /* 실패했을 때만 파일을 닫음 */
+  if (!success) 
+    {
+      file_close (file);
+    }
+    
   return success;
 }
 
